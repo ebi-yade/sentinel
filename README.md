@@ -1,2 +1,3 @@
-# sentinel
-prevents sensitive values from being exposed in telemetry.
+# Sentinel
+
+prevents _**sensitive**_ values from being exposed in _**telemetry**_.
