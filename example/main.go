@@ -27,13 +27,13 @@ func (c Custom) LogValue() slog.Value {
 	default:
 		v = "Unknown"
 	}
-	return slog.StringValue(v)
+	return slog.GroupValue(slog.String("enum", v))
 }
 
 type Example struct {
 	ID      int
 	Name    string
-	Nested  Nested
+	Nested  *Nested
 	Custom  Custom
 	Friends []string `sentinel:"true"`
 }
@@ -46,7 +46,7 @@ func main() {
 		Custom: Custom{
 			Enum: 2,
 		},
-		Nested: Nested{
+		Nested: &Nested{
 			Secret: "TopSecret",
 			Data:   "PublicData",
 		},

@@ -7,33 +7,13 @@ import (
 
 // ReplaceAttr processes each attribute and zeroes out any fields marked with the `sentinel` tag.
 func ReplaceAttr(groups []string, a slog.Attr) slog.Attr {
-	a.Value = processValue(a.Value, make(map[uintptr]bool))
+	if a.Value.Kind() == slog.KindAny {
+		a.Value = processAny(a.Value.Any(), make(map[uintptr]bool))
+	}
 	return a
 }
 
-// processValue recursively processes a slog.Value, handling different kinds appropriately.
-func processValue(v slog.Value, visited map[uintptr]bool) slog.Value {
-	switch v.Kind() {
-	case slog.KindAny:
-		return processAny(v.Any(), visited)
-	case slog.KindGroup:
-		// Process each Attr in the group
-		attrs := v.Group()
-		for i, attr := range attrs {
-			attrs[i].Value = processValue(attr.Value, visited)
-		}
-		return slog.GroupValue(attrs...)
-	case slog.KindLogValuer:
-		// Evaluate the LogValuer and process the resulting Value
-		evaluated := v.LogValuer().LogValue()
-		return processValue(evaluated, visited)
-	default:
-		// For other kinds, return the value as is
-		return v
-	}
-}
-
-// processAny handles values of KindAny, which can be any Go value.
+// processAny handles values, zeroing out sensitive fields.
 func processAny(val interface{}, visited map[uintptr]bool) slog.Value {
 	if val == nil {
 		return slog.AnyValue(nil)
@@ -41,8 +21,9 @@ func processAny(val interface{}, visited map[uintptr]bool) slog.Value {
 
 	// Check if val implements slog.LogValuer
 	if valuer, ok := val.(slog.LogValuer); ok {
+		// Evaluate the LogValuer
 		evaluated := valuer.LogValue()
-		return processValue(evaluated, visited)
+		return evaluated.Resolve()
 	}
 
 	rv := reflect.ValueOf(val)
@@ -60,12 +41,6 @@ func processAny(val interface{}, visited map[uintptr]bool) slog.Value {
 		}
 		visited[addr] = true
 
-		// Check if rv.Interface() implements slog.LogValuer
-		if valuer, ok := rv.Interface().(slog.LogValuer); ok {
-			evaluated := valuer.LogValue()
-			return processValue(evaluated, visited)
-		}
-
 		rv = rv.Elem()
 	}
 
@@ -76,9 +51,6 @@ func processAny(val interface{}, visited map[uintptr]bool) slog.Value {
 		return processSliceOrArray(rv, visited)
 	case reflect.Map:
 		return processMap(rv, visited)
-	case reflect.Pointer:
-		// Should not reach here due to earlier handling, but included for completeness
-		return processPointer(rv, visited)
 	default:
 		// For basic types, return the value as is
 		return slog.AnyValue(rv.Interface())
@@ -88,42 +60,32 @@ func processAny(val interface{}, visited map[uintptr]bool) slog.Value {
 // processStruct processes struct types, zeroing out sensitive fields.
 func processStruct(rv reflect.Value, visited map[uintptr]bool) slog.Value {
 	rt := rv.Type()
-
-	// Create a copy of the original struct
-	newStruct := reflect.New(rt).Elem()
-	newStruct.Set(rv)
+	var attrs []slog.Attr
 
 	for i := 0; i < rv.NumField(); i++ {
 		structField := rt.Field(i)
-		newField := newStruct.Field(i)
+		fieldValue := rv.Field(i)
 
 		// Check if the field is exported
-		if !newField.CanInterface() {
-			// Cannot access unexported fields
+		if !fieldValue.CanInterface() {
 			continue
 		}
 
+		fieldName := structField.Name
+
 		// Check for the 'sentinel' tag
 		if structField.Tag.Get("sentinel") != "" {
-			if newField.CanSet() {
-				// Zero out the sensitive field
-				zeroValue := reflect.Zero(newField.Type())
-				newField.Set(zeroValue)
-			}
+			// Zero out the sensitive field
+			zeroValue := reflect.Zero(structField.Type).Interface()
+			attrs = append(attrs, slog.Any(fieldName, zeroValue))
 		} else {
 			// Recursively process the field
-			fieldValue := newField.Interface()
-			processedValue := processAny(fieldValue, visited)
-			newValue := reflect.ValueOf(processedValue.Any())
-
-			// Ensure type compatibility and that the field is settable
-			if newValue.Type().AssignableTo(structField.Type) && newField.CanSet() {
-				newField.Set(newValue)
-			}
+			processedValue := processAny(fieldValue.Interface(), visited)
+			attrs = append(attrs, slog.Any(fieldName, processedValue.Any()))
 		}
 	}
 
-	return slog.AnyValue(newStruct.Interface())
+	return slog.GroupValue(attrs...)
 }
 
 // processSliceOrArray processes slices and arrays, recursively processing each element.
@@ -196,29 +158,4 @@ func processMap(rv reflect.Value, visited map[uintptr]bool) slog.Value {
 	}
 
 	return slog.AnyValue(newMap.Interface())
-}
-
-// processPointer processes pointer types, handling cycles and recursion.
-func processPointer(rv reflect.Value, visited map[uintptr]bool) slog.Value {
-	if rv.IsNil() {
-		return slog.AnyValue(nil)
-	}
-
-	// Cycle detection
-	addr := rv.Pointer()
-	if visited[addr] {
-		return slog.AnyValue(rv.Interface())
-	}
-	visited[addr] = true
-
-	processedValue := processAny(rv.Elem().Interface(), visited)
-	newPtr := reflect.New(rv.Type().Elem())
-	newValue := reflect.ValueOf(processedValue.Any())
-
-	// Ensure type compatibility
-	if newValue.Type().AssignableTo(rv.Type().Elem()) {
-		newPtr.Elem().Set(newValue)
-	}
-
-	return slog.AnyValue(newPtr.Interface())
 }
